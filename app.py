@@ -1,305 +1,427 @@
-# app.py
 import os
+import sqlite3
+import hashlib
 import streamlit as st
-import pandas as pd
-from db_manager import execute_query, hash_password, get_dm_partners, supabase
+from PIL import Image
+from streamlit_cookies_manager import EncryptedCookieManager
 
-# 1. Page Configuration & Custom CSS Injection
-st.set_page_config(page_title="ObamOfcCmty Premium", layout="wide", initial_sidebar_state="expanded")
+cookies = EncryptedCookieManager(
+    prefix="obamofccmty/",
+    password=os.environ.get("COOKIES_SECRET_KEY", "a_very_secure_and_long_secret_key_here_123456789")
+)
+if not cookies.ready():
+    st.stop()
 
-# Smooth custom styles matching professional night dark-modes
-st.markdown("""
-<style>
-    .stApp { background-color: #0e1117; color: #c9d1d9; }
-    div[data-testid="stExpander"] { background-color: #161b22; border-radius: 8px; }
-    .dm-bubble-me { background-color: #238636; padding: 10px; border-radius: 12px 12px 0px 12px; margin: 5px 0; text-align: right; }
-    .dm-bubble-them { background-color: #21262d; padding: 10px; border-radius: 12px 12px 12px 0px; margin: 5px 0; text-align: left; }
-</style>
-""", unsafe_allow_html=True)
+DB_FILE = "database.db"
 
-# 2. Session Context Init
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY, password TEXT, bio TEXT, avatar BLOB, 
+                    role TEXT DEFAULT 'user', last_ip TEXT, last_device TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS follows (
+                    follower TEXT, following TEXT, PRIMARY KEY(follower, following))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT, text TEXT, video BLOB)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS likes (
+                    post_id INTEGER, username TEXT, PRIMARY KEY(post_id, username))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS servers (
+                    name TEXT PRIMARY KEY)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS channels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, server_name TEXT, name TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS channel_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, user TEXT, text TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS dms (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_from TEXT, user_to TEXT, text TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS msg_reactions (
+                    message_id INTEGER, msg_type TEXT, username TEXT, emoji TEXT, 
+                    PRIMARY KEY(message_id, msg_type, username, emoji))''')
+
+    admin_hash = hashlib.sha256("Upd20isreal".encode()).hexdigest()
+    c.execute("SELECT username FROM users WHERE username = ?", ("ArchPenguin",))
+    if not c.fetchone():
+        c.execute("INSERT INTO users (username, password, bio, role) VALUES (?, ?, ?, ?)",
+                  ("ArchPenguin", admin_hash, "System Administrator", "superuser"))
+
+    c.execute("INSERT OR IGNORE INTO servers (name) VALUES (?)", ("Global Server",))
+    c.execute("SELECT id FROM channels WHERE server_name = ? AND name = ?", ("Global Server", "general"))
+    if not c.fetchone():
+        c.execute("INSERT INTO channels (server_name, name) VALUES (?, ?)", ("Global Server", "general"))
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+def query_db(query, args=(), one=False, commit=False):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(query, args)
+    if commit:
+        conn.commit()
+        rv = c.lastrowid if "INSERT" in query else None
+    else:
+        rv = c.fetchall()
+    conn.close()
+    return (rv[0] if rv else None) if one else rv
+
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def get_client_info():
+    ctx = st.context
+    headers = ctx.headers
+    ip = headers.get("X-Forwarded-For", headers.get("Remote-Addr", "127.0.0.1")).split(",")[0].strip()
+    user_agent = headers.get("User-Agent", "Unknown Device")
+    return ip, user_agent
+
+
 if "user" not in st.session_state:
-    st.session_state.user = None
+    st.session_state.user = cookies.get("auth_user")
 if "current_view" not in st.session_state:
     st.session_state.current_view = "Feed"
 if "active_server" not in st.session_state:
     st.session_state.active_server = "Global Server"
 if "active_channel_id" not in st.session_state:
-    st.session_state.active_channel_id = None
+    ch = query_db("SELECT id FROM channels WHERE server_name = ? AND name = ?", ("Global Server", "general"), one=True)
+    st.session_state.active_channel_id = ch[0] if ch else None
 
 
-# Helper Client Analytics info
-def get_client_info():
-    ctx = st.context
-    headers = ctx.headers
-    ip = headers.get("X-Forwarded-For", headers.get("Remote-Addr", "127.0.0.1")).split(",")[0].strip()
-    ua = headers.get("User-Agent", "Desktop Browser")
-    return ip, ua
+def render_sidebar(is_admin):
+    st.sidebar.title("ObamOfcCmty")
+    if os.path.exists("logo.png"):
+        st.sidebar.image(Image.open("logo.png"), use_container_width=True)
+
+    st.sidebar.write(f"Logged in as: **{st.session_state.user}**")
+    if st.sidebar.button("Log Out"):
+        cookies["auth_user"] = ""
+        cookies.save()
+        st.session_state.user = None
+        st.rerun()
+
+    st.sidebar.markdown("---")
+
+    views = ["Feed", "Servers", "Direct Messages", "Profile Settings"]
+    if is_admin:
+        views.append("Admin Dashboard")
+
+    for view in views:
+        if st.sidebar.button(view, use_container_width=True):
+            st.session_state.current_view = view
+            st.rerun()
 
 
-# 3. Security Routing Gateway (Login/Register)
+user_role_data = query_db("SELECT role FROM users WHERE username = ?", (st.session_state.user,),
+                          one=True) if st.session_state.user else None
+is_admin_user = user_role_data and user_role_data[0] in ["admin", "superuser"]
+
 if st.session_state.user is None:
-    st.title("🚀 ObamOfcCmty Engine")
-    tab1, tab2 = st.tabs(["🔒 Secure Login", "📝 Open Account"])
+    st.title("ObamOfcCmty")
+    if os.path.exists("logo.png"):
+        st.image(Image.open("logo.png"), width=150)
+
+    tab1, tab2 = st.tabs(["Login", "Register"])
 
     with tab1:
-        username_input = st.text_input("Username", key="l_user")
-        password_input = st.text_input("Password", type="password", key="l_pass")
-        if st.button("Enter Platform", use_container_width=True):
-            user_data = execute_query("users", "select", filters={"username": username_input})
-            if user_data and user_data[0]['password'] == hash_password(password_input):
+        username_input = st.text_input("Username", key="login_user")
+        password_input = st.text_input("Password", type="password", key="login_pass")
+        if st.button("Enter"):
+            user_data = query_db("SELECT password FROM users WHERE username = ?", (username_input,), one=True)
+            if user_data and user_data[0] == hash_password(password_input):
                 ip, ua = get_client_info()
-                execute_query("users", "update", data={"last_ip": ip, "last_device": ua},
-                              filters={"username": username_input})
+                query_db("UPDATE users SET last_ip = ?, last_device = ? WHERE username = ?", (ip, ua, username_input),
+                         commit=True)
+                cookies["auth_user"] = username_input
+                cookies.save()
                 st.session_state.user = username_input
                 st.rerun()
             else:
-                st.error("Access Refused: Invalid Credentials.")
+                st.error("Invalid credentials.")
 
     with tab2:
-        reg_user = st.text_input("Preferred Username", key="r_user")
-        reg_pass = st.text_input("Secure Password", type="password", key="r_pass")
-        if st.button("Register Credentials", use_container_width=True):
-            if reg_user.strip() and reg_pass.strip():
-                existing = execute_query("users", "select", filters={"username": reg_user})
-                if existing:
-                    st.error("Identifier occupied.")
-                else:
-                    ip, ua = get_client_info()
-                    execute_query("users", "insert", data={
-                        "username": reg_user, "password": hash_password(reg_pass),
-                        "bio": "New Community Node", "role": "user", "last_ip": ip, "last_device": ua
-                    })
-                    st.success("Registration complete! Switch to Login tab.")
-    st.stop()
+        reg_user = st.text_input("Choose Username", key="reg_user")
+        reg_pass = st.text_input("Choose Password", type="password", key="reg_pass")
+        if st.button("Create Account"):
+            if not reg_user.strip() or not reg_pass.strip():
+                st.error("Fields cannot be empty.")
+            elif query_db("SELECT username FROM users WHERE username = ?", (reg_user,), one=True):
+                st.error("Username taken.")
+            else:
+                ip, ua = get_client_info()
+                query_db("INSERT INTO users (username, password, bio, last_ip, last_device) VALUES (?, ?, ?, ?, ?)",
+                         (reg_user, hash_password(reg_pass), "", ip, ua), commit=True)
+                st.success("Account created. You can now log in.")
+else:
+    render_sidebar(is_admin_user)
+    view = st.session_state.current_view
 
-# 4. User Role Verification Layer
-user_info = execute_query("users", "select", filters={"username": st.session_state.user})
-is_admin = user_info and user_info[0].get("role") in ["admin", "superuser"]
+    if view == "Feed":
+        st.header("Feed")
 
-# 5. Global Sidebar Controls
-st.sidebar.title("ObamOfcCmty")
-st.sidebar.subheader(f"🌐 @{st.session_state.user}")
-if st.sidebar.button("🔌 Sign Out", use_container_width=True):
-    st.session_state.user = None
-    st.rerun()
+        with st.form("new_post", clear_on_submit=True):
+            post_text = st.text_area("What is happening?")
+            uploaded_video = st.file_uploader("Upload Video", type=["mp4", "mov", "avi"])
+            if st.form_submit_button("Post"):
+                if post_text.strip() or uploaded_video:
+                    video_data = uploaded_video.read() if uploaded_video else None
+                    query_db("INSERT INTO posts (author, text, video) VALUES (?, ?, ?)",
+                             (st.session_state.user, post_text, video_data), commit=True)
+                    st.rerun()
 
-st.sidebar.markdown("---")
-views = ["Feed", "Servers Hub (Discord Mode)", "Direct Messages", "Accounts Directory", "Profile Settings"]
-if is_admin:
-    views.append("Admin Dashboard")
+        posts = query_db("SELECT id, author, text, video FROM posts ORDER BY id DESC")
+        for p_id, author, text, video in posts:
+            st.markdown(f"**{author}**")
+            if text:
+                st.write(text)
+            if video:
+                st.video(video)
 
-for v in views:
-    if st.sidebar.button(v, use_container_width=True,
-                         variant="secondary" if st.session_state.current_view != v else "primary"):
-        st.session_state.current_view = v
-        st.rerun()
-
-view = st.session_state.current_view
-
-# ================== VIEW 1: REDDIT-STYLE FEED ==================
-if view == "Feed":
-    st.header("📌 Global Community Feed")
-
-    with st.form("new_reddit_post", clear_on_submit=True):
-        p_text = st.text_area("Share something interesting...", placeholder="What's happening around you?")
-        p_media = st.text_input("Image/Video URL attachment (Optional)")
-        if st.form_submit_button("Broadcast Post"):
-            if p_text.strip() or p_media.strip():
-                execute_query("posts", "insert",
-                              data={"author": st.session_state.user, "text": p_text, "media_url": p_media})
-                st.rerun()
-
-    posts = execute_query("posts", "select", order_by="id", desc=True)
-    for p in posts:
-        with st.container(border=True):
-            st.markdown(f"**🟢 @{p['author']}** posted:")
-            if p['text']: st.write(p['text'])
-            if p.get('media_url'):
-                if any(ext in p['media_url'].lower() for ext in ['.mp4', '.mov', '.avi']):
-                    st.video(p['media_url'])
-                else:
-                    st.image(p['media_url'], use_container_width=True)
-
-            # Engagement Metrics Array
-            likes = execute_query("likes", "select", filters={"post_id": p['id']})
+            likes = query_db("SELECT username FROM likes WHERE post_id = ?", (p_id,))
             likes_count = len(likes)
-            has_liked = any(lk['username'] == st.session_state.user for lk in likes)
+            is_liked = any(l[0] == st.session_state.user for l in likes)
+            like_label = f"Liked ({likes_count})" if is_liked else f"Like ({likes_count})"
 
-            col_lk, col_del = st.columns([1, 5])
-            if col_lk.button(f"❤️ ({likes_count})" if has_liked else f"🤍 ({likes_count})", key=f"lk_{p['id']}"):
-                if has_liked:
-                    execute_query("likes", "delete", filters={"post_id": p['id'], "username": st.session_state.user})
-                else:
-                    execute_query("likes", "insert", data={"post_id": p['id'], "username": st.session_state.user})
-                st.rerun()
+            col_lk, col_del = st.columns([1, 8])
+            with col_lk:
+                if st.button(like_label, key=f"like_{p_id}"):
+                    if is_liked:
+                        query_db("DELETE FROM likes WHERE post_id = ? AND username = ?", (p_id, st.session_state.user),
+                                 commit=True)
+                    else:
+                        query_db("INSERT INTO likes (post_id, username) VALUES (?, ?)", (p_id, st.session_state.user),
+                                 commit=True)
+                    st.rerun()
+            with col_del:
+                if is_admin_user:
+                    if st.button("Delete Post", key=f"del_post_{p_id}"):
+                        query_db("DELETE FROM posts WHERE id = ?", (p_id,), commit=True)
+                        query_db("DELETE FROM likes WHERE post_id = ?", (p_id,), commit=True)
+                        st.rerun()
+            st.markdown("---")
 
-            if is_admin and col_del.button("🗑️ Purge", key=f"del_{p['id']}"):
-                execute_query("posts", "delete", filters={"id": p['id']})
-                st.rerun()
+    elif view == "Servers":
+        st.header("Servers")
+        col1, col2 = st.columns([1, 3])
 
-# ================== VIEW 2: DISCORD-STYLE SERVERS ==================
-elif view == "Servers Hub (Discord Mode)":
-    st.header("💬 Connected Communities")
-    srv_col, ch_col, chat_col = st.columns([1, 1, 2])
-
-    with srv_col:
-        st.subheader("Guilds")
-        srv_name = st.text_input("New Server")
-        if st.button("➕ Add", use_container_width=True) and srv_name.strip():
-            execute_query("servers", "insert", data={"name": srv_name})
-            execute_query("channels", "insert", data={"server_name": srv_name, "name": "general"})
-            st.rerun()
-
-        all_srvs = execute_query("servers", "select")
-        for s in all_srvs:
-            if st.button(f"📁 {s['name']}", key=f"s_{s['name']}", use_container_width=True):
-                st.session_state.active_server = s['name']
-                st.rerun()
-
-    current_srv = st.session_state.active_server
-
-    with ch_col:
-        st.subheader(f"# {current_srv}")
-        new_ch = st.text_input("New Channel")
-        if st.button("➕ Create Channel", use_container_width=True) and new_ch.strip():
-            execute_query("channels", "insert", data={"server_name": current_srv, "name": new_ch})
-            st.rerun()
-
-        channels = execute_query("channels", "select", filters={"server_name": current_srv})
-        if channels and not st.session_state.active_channel_id:
-            st.session_state.active_channel_id = channels[0]['id']
-
-        for ch in channels:
-            if st.button(f"💬 {ch['name']}", key=f"ch_{ch['id']}", use_container_width=True):
-                st.session_state.active_channel_id = ch['id']
-                st.rerun()
-
-    with chat_col:
-        st.subheader("Channel Communication Stream")
-        active_ch = st.session_state.active_channel_id
-        if active_ch:
-            # Fixed-height scrollable window to prevent scrolling decay
-            with st.container(height=400, border=True):
-                msgs = execute_query("channel_messages", "select", filters={"channel_id": active_ch}, order_by="id")
-                for m in msgs:
-                    st.markdown(f"**@{m['user']}**: {m['text']}")
-
-            with st.form("send_ch_msg", clear_on_submit=True):
-                txt = st.text_input("Type a message...", label_visibility="collapsed")
-                if st.form_submit_button("Send") and txt.strip():
-                    execute_query("channel_messages", "insert",
-                                  data={"channel_id": active_ch, "user": st.session_state.user, "text": txt})
+        with col1:
+            st.subheader("Navigation")
+            new_server = st.text_input("New Server Name")
+            if st.button("Create Server"):
+                if new_server.strip() and not query_db("SELECT name FROM servers WHERE name = ?", (new_server,),
+                                                       one=True):
+                    query_db("INSERT INTO servers (name) VALUES (?)", (new_server,), commit=True)
+                    query_db("INSERT INTO channels (server_name, name) VALUES (?, ?)", (new_server, "general"),
+                             commit=True)
                     st.rerun()
 
-# ================== VIEW 3: SMART DM MATRIX ==================
-elif view == "Direct Messages":
-    st.header("📥 Direct Message Matrices")
-    list_col, main_chat_col = st.columns([1, 2])
-
-    with list_col:
-        st.subheader("Recent Contacts")
-        active_partners = get_dm_partners(st.session_state.user)
-        target_search = st.text_input("🔍 Start conversation (Enter Username)")
-
-        selected_partner = None
-        if target_search.strip():
-            selected_partner = target_search.strip()
-        elif active_partners:
-            selected_partner = st.radio("Active Threads", active_partners)
-
-    with main_chat_col:
-        if selected_partner:
-            st.subheader(f"Conversation with @{selected_partner}")
-
-            with st.container(height=450, border=True):
-                # Bidirectional message resolution query logic
-                raw_dms = execute_query("dms", "select", order_by="id")
-                filtered_dms = [d for d in raw_dms if
-                                (d['user_from'] == st.session_state.user and d['user_to'] == selected_partner) or (
-                                            d['user_from'] == selected_partner and d[
-                                        'user_to'] == st.session_state.user)]
-
-                for dm in filtered_dms:
-                    style_class = "dm-bubble-me" if dm['user_from'] == st.session_state.user else "dm-bubble-them"
-                    st.markdown(f"<div class='{style_class}'><b>@{dm['user_from']}:</b> {dm['text']}</div>",
-                                unsafe_with_html=True)
-                    if dm.get("media_url"):
-                        st.image(dm["media_url"], width=250)
-
-            with st.form("dm_input_form", clear_on_submit=True):
-                d_msg = st.text_input("Secure message body")
-                d_media = st.text_input("Image Attachment URL (Optional)")
-                if st.form_submit_button("Transmit DM") and d_msg.strip():
-                    execute_query("dms", "insert",
-                                  data={"user_from": st.session_state.user, "user_to": selected_partner, "text": d_msg,
-                                        "media_url": d_media})
+            st.markdown("---")
+            servers = query_db("SELECT name FROM servers")
+            for server in servers:
+                if st.button(server[0], key=f"srv_{server[0]}", use_container_width=True):
+                    st.session_state.active_server = server[0]
+                    first_ch = query_db("SELECT id FROM channels WHERE server_name = ? LIMIT 1", (server[0],), one=True)
+                    st.session_state.active_channel_id = first_ch[0] if first_ch else None
                     st.rerun()
-        else:
-            st.info("Pick or search an entity handle to prompt messaging infrastructure.")
 
-# ================== VIEW 4: TWITTER/X LOOKS ACCOUNT DIRECTORY ==================
-elif view == "Accounts Directory":
-    st.header("🗂️ Global Account Nodes")
-    all_users_list = [u['username'] for u in execute_query("users", "select") if u['username'] != st.session_state.user]
-    chosen_lookup = st.selectbox("Search Identity Profiles", [""] + all_users_list)
+        with col2:
+            srv = st.session_state.active_server
+            st.subheader(f"Server: {srv}")
 
-    if chosen_lookup:
-        tgt_data = execute_query("users", "select", filters={"username": chosen_lookup})[0]
-        with st.container(border=True):
-            st.subheader(f"✨ Profile: @{tgt_data['username']}")
-            st.markdown(f"**Bio:** *{tgt_data.get('bio', 'No description configured.')}*")
-            st.caption(f"Network Authorization Class: {tgt_data.get('role', 'user').upper()}")
+            ch_col, chat_col = st.columns([1, 2])
+            with ch_col:
+                st.write("**Channels**")
+                new_ch = st.text_input("New Channel")
+                if st.button("Add Channel"):
+                    if new_ch.strip() and not query_db("SELECT id FROM channels WHERE server_name = ? AND name = ?",
+                                                       (srv, new_ch), one=True):
+                        query_db("INSERT INTO channels (server_name, name) VALUES (?, ?)", (srv, new_ch), commit=True)
+                        st.rerun()
 
-            # Follow system calculations
-            is_following = execute_query("follows", "select",
-                                         filters={"follower": st.session_state.user, "following": chosen_lookup})
+                channels = query_db("SELECT id, name FROM channels WHERE server_name = ?", (srv,))
+                for ch_id, ch_name in channels:
+                    if st.button(f"# {ch_name}", key=f"ch_{ch_id}", use_container_width=True):
+                        st.session_state.active_channel_id = ch_id
+                        st.rerun()
+
+            with chat_col:
+                ch_id = st.session_state.active_channel_id
+                if ch_id:
+                    ch_info = query_db("SELECT name FROM channels WHERE id = ?", (ch_id,), one=True)
+                    st.write(f"### #{ch_info[0] if ch_info else ''}")
+
+
+                    @st.fragment(run_every=2)
+                    def show_server_chat(channel_idx):
+                        messages = query_db(
+                            "SELECT id, user, text FROM channel_messages WHERE channel_id = ? ORDER BY id ASC",
+                            (channel_idx,))
+                        for msg_id, msg_user, msg_text in messages:
+                            reactions = query_db(
+                                "SELECT emoji, COUNT(*) FROM msg_reactions WHERE message_id = ? AND msg_type = 'channel' GROUP BY emoji",
+                                (msg_id,))
+                            react_str = " ".join([f"{r[0]}{r[1]}" for r in reactions])
+
+                            col_msg, col_act = st.columns([4, 1])
+                            with col_msg:
+                                st.markdown(f"**{msg_user}**: {msg_text}  \n*{react_str}*")
+                            with col_act:
+                                sub_col1, sub_col2 = st.columns(2)
+                                with sub_col1:
+                                    if st.button("👍", key=f"react_ch_{msg_id}"):
+                                        query_db(
+                                            "INSERT OR IGNORE INTO msg_reactions (message_id, msg_type, username, emoji) VALUES (?, 'channel', ?, '👍')",
+                                            (msg_id, st.session_state.user), commit=True)
+                                with sub_col2:
+                                    if is_admin_user:
+                                        if st.button("🗑️", key=f"del_ch_{msg_id}"):
+                                            query_db("DELETE FROM channel_messages WHERE id = ?", (msg_id,),
+                                                     commit=True)
+                                            query_db(
+                                                "DELETE FROM msg_reactions WHERE message_id = ? AND msg_type = 'channel'",
+                                                (msg_id,), commit=True)
+                                            st.rerun()
+
+
+                    show_server_chat(ch_id)
+
+                    with st.form("send_msg", clear_on_submit=True):
+                        msg_text = st.text_input("Message")
+                        if st.form_submit_button("Send"):
+                            if msg_text.strip():
+                                query_db("INSERT INTO channel_messages (channel_id, user, text) VALUES (?, ?, ?)",
+                                         (ch_id, st.session_state.user, msg_text), commit=True)
+                                st.rerun()
+
+    elif view == "Direct Messages":
+        st.header("Direct Messages")
+        target_user = st.text_input("Enter Username to Chat")
+        if query_db("SELECT username FROM users WHERE username = ?", (target_user,),
+                    one=True) and target_user != st.session_state.user:
+
+            @st.fragment(run_every=2)
+            def show_dm_chat(target):
+                messages = query_db('''SELECT id, user_from, text FROM dms 
+                                       WHERE (user_from = ? AND user_to = ?) OR (user_from = ? AND user_to = ?) 
+                                       ORDER BY id ASC''',
+                                    (st.session_state.user, target, target, st.session_state.user))
+                for msg_id, msg_from, msg_text in messages:
+                    reactions = query_db(
+                        "SELECT emoji, COUNT(*) FROM msg_reactions WHERE message_id = ? AND msg_type = 'dm' GROUP BY emoji",
+                        (msg_id,))
+                    react_str = " ".join([f"{r[0]}{r[1]}" for r in reactions])
+
+                    col_msg, col_act = st.columns([4, 1])
+                    with col_msg:
+                        st.markdown(f"**{msg_from}**: {msg_text}  \n*{react_str}*")
+                    with col_act:
+                        sub_col1, sub_col2 = st.columns(2)
+                        with sub_col1:
+                            if st.button("👍", key=f"react_dm_{msg_id}"):
+                                query_db(
+                                    "INSERT OR IGNORE INTO msg_reactions (message_id, msg_type, username, emoji) VALUES (?, 'dm', ?, '👍')",
+                                    (msg_id, st.session_state.user), commit=True)
+                        with sub_col2:
+                            if is_admin_user:
+                                if st.button("🗑️", key=f"del_dm_{msg_id}"):
+                                    query_db("DELETE FROM dms WHERE id = ?", (msg_id,), commit=True)
+                                    query_db("DELETE FROM msg_reactions WHERE message_id = ? AND msg_type = 'dm'",
+                                             (msg_id,), commit=True)
+                                    st.rerun()
+
+
+            show_dm_chat(target_user)
+
+            with st.form("dm_form", clear_on_submit=True):
+                dm_text = st.text_input("Message")
+                if st.form_submit_button("Send"):
+                    if dm_text.strip():
+                        query_db("INSERT INTO dms (user_from, user_to, text) VALUES (?, ?, ?)",
+                                 (st.session_state.user, target_user, dm_text), commit=True)
+                        st.rerun()
+        elif target_user:
+            st.error("User not found.")
+
+    elif view == "Profile Settings":
+        st.header("Profile Settings")
+        u_data = query_db("SELECT bio FROM users WHERE username = ?", (st.session_state.user,), one=True)
+        followers = query_db("SELECT follower FROM follows WHERE following = ?", (st.session_state.user,))
+        following = query_db("SELECT following FROM follows WHERE follower = ?", (st.session_state.user,))
+
+        st.write(f"Followers: {len(followers)} | Following: {len(following)}")
+
+        new_bio = st.text_area("Bio", value=u_data[0] if u_data else "")
+        avatar_file = st.file_uploader("Upload Profile Picture", type=["png", "jpg", "jpeg"])
+
+        if st.button("Save Profile"):
+            avatar_data = avatar_file.read() if avatar_file else None
+            if avatar_data:
+                query_db("UPDATE users SET bio = ?, avatar = ? WHERE username = ?",
+                         (new_bio, avatar_data, st.session_state.user), commit=True)
+            else:
+                query_db("UPDATE users SET bio = ? WHERE username = ?", (new_bio, st.session_state.user), commit=True)
+            st.success("Profile updated.")
+            st.rerun()
+
+        st.markdown("---")
+        st.subheader("Find Users")
+
+        all_users = [u[0] for u in query_db("SELECT username FROM users WHERE username != ?", (st.session_state.user,))]
+        search_u = st.selectbox("Search Username", [""] + all_users)
+
+        if search_u:
+            target_bio = query_db("SELECT bio FROM users WHERE username = ?", (search_u,), one=True)[0]
+            st.write(f"**{search_u}**")
+            st.write(target_bio)
+
+            is_following = query_db("SELECT 1 FROM follows WHERE follower = ? AND following = ?",
+                                    (st.session_state.user, search_u), one=True)
             if is_following:
-                if st.button("Unfollow Target Account", type="primary"):
-                    execute_query("follows", "delete",
-                                  filters={"follower": st.session_state.user, "following": chosen_lookup})
+                if st.button("Unfollow"):
+                    query_db("DELETE FROM follows WHERE follower = ? AND following = ?",
+                             (st.session_state.user, search_u), commit=True)
                     st.rerun()
             else:
-                if st.button("Follow Target Account"):
-                    execute_query("follows", "insert",
-                                  data={"follower": st.session_state.user, "following": chosen_lookup})
+                if st.button("Follow"):
+                    query_db("INSERT INTO follows (follower, following) VALUES (?, ?)",
+                             (st.session_state.user, search_u), commit=True)
                     st.rerun()
 
-# ================== VIEW 5: PROFILE SETTINGS ==================
-elif view == "Profile Settings":
-    st.header("⚙️ Personal System Preferences")
-    current_bio = user_info[0].get("bio", "")
-    new_bio = st.text_area("Modify Account Biography", value=current_bio)
-    if st.button("Commit Configuration Updates"):
-        execute_query("users", "update", data={"bio": new_bio}, filters={"username": st.session_state.user})
-        st.success("Changes permanently pushed to cloud context stores.")
-        st.rerun()
+    elif view == "Admin Dashboard" and is_admin_user:
+        st.header("Admin Dashboard")
 
-# ================== VIEW 6: ADMIN CONTROL PANEL ==================
-elif view == "Admin Dashboard" and is_admin:
-    st.header("🛡️ System Administration Console")
+        st.subheader("Manage System Administration Permissions")
+        cmd_user = st.text_input("Target User Profile")
+        cmd_action = st.selectbox("Action", ["Promote to Admin", "Demote to User", "Delete Profile Data Entirely"])
 
-    t_user = st.text_input("Target Account Identifier")
-    t_action = st.selectbox("Action Execution Sequence",
-                            ["Promote to Admin", "Demote to User", "Purge Data Store Profile"])
+        if st.button("Execute Action"):
+            target_role = query_db("SELECT role FROM users WHERE username = ?", (cmd_user,), one=True)
+            if not target_role:
+                st.error("Target individual does not exist.")
+            elif cmd_user == "ArchPenguin":
+                st.error("Superuser credentials cannot be mutated.")
+            else:
+                if cmd_action == "Promote to Admin":
+                    query_db("UPDATE users SET role = 'admin' WHERE username = ?", (cmd_user,), commit=True)
+                    st.success(f"{cmd_user} elevated to Administrator status.")
+                elif cmd_action == "Demote to User":
+                    query_db("UPDATE users SET role = 'user' WHERE username = ?", (cmd_user,), commit=True)
+                    st.success(f"{cmd_user} demoted back to Standard User.")
+                elif cmd_action == "Delete Profile Data Entirely":
+                    query_db("DELETE FROM users WHERE username = ?", (cmd_user,), commit=True)
+                    st.success(f"Purged data entries for target: {cmd_user}")
+                st.rerun()
 
-    if st.button("Run Administrative Action"):
-        exists = execute_query("users", "select", filters={"username": t_user})
-        if not exists:
-            st.error("Target node missing.")
-        elif t_user == "ArchPenguin":
-            st.error("Immutable system core context cannot be changed.")
-        else:
-            if t_action == "Promote to Admin":
-                execute_query("users", "update", data={"role": "admin"}, filters={"username": t_user})
-            elif t_action == "Demote to User":
-                execute_query("users", "update", data={"role": "user"}, filters={"username": t_user})
-            elif t_action == "Purge Data Store Profile":
-                execute_query("users", "delete", filters={"username": t_user})
-            st.success("Administrative operation completed successfully.")
-            st.rerun()
+        st.markdown("---")
+        st.subheader("User Directory Audit Tracker")
 
-    st.markdown("---")
-    st.subheader("Global Security Audit Log")
-    records = execute_query("users", "select")
-    st.dataframe(pd.DataFrame(records)[["username", "role", "last_ip", "last_device"]], use_container_width=True)
+        user_records = query_db("SELECT username, password, role, last_ip, last_device FROM users")
+        import pandas as pd
+
+        df = pd.DataFrame(user_records,
+                          columns=["Username", "Hashed Password", "System Role", "Logged IP", "Device Agent String"])
+        st.dataframe(df, use_container_width=True)

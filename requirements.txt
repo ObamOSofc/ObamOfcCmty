@@ -2,4 +2,3 @@ streamlit
 pillow
 streamlit-cookies-manager
 pandas
-supabase
