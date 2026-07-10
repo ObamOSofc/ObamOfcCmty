@@ -24,75 +24,71 @@ MAX_DB_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 def cleanup_old_db_data():
     """Prunes old rows if the SQLite database exceeds the 2 GB threshold."""
     if os.path.exists(DB_FILE) and os.path.getsize(DB_FILE) > MAX_DB_SIZE:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        # Delete oldest 20% of contents based on auto-incrementing primary keys
-        c.execute(
-            "DELETE FROM channel_messages WHERE id IN (SELECT id FROM channel_messages ORDER BY id ASC LIMIT 200)")
-        c.execute("DELETE FROM dms WHERE id IN (SELECT id FROM dms ORDER BY id ASC LIMIT 200)")
-        c.execute("DELETE FROM posts WHERE id IN (SELECT id FROM posts ORDER BY id ASC LIMIT 50)")
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_FILE) as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM channel_messages WHERE id IN (SELECT id FROM channel_messages ORDER BY id ASC LIMIT 200)")
+            c.execute("DELETE FROM dms WHERE id IN (SELECT id FROM dms ORDER BY id ASC LIMIT 200)")
+            c.execute("DELETE FROM posts WHERE id IN (SELECT id FROM posts ORDER BY id ASC LIMIT 50)")
+            conn.commit()
 
 
 def init_db():
     cleanup_old_db_data()
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-                    username TEXT PRIMARY KEY, password TEXT, bio TEXT, avatar_path TEXT, 
-                    role TEXT DEFAULT 'user', last_ip TEXT, last_device TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS follows (
-                    follower TEXT, following TEXT, PRIMARY KEY(follower, following))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS posts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT, text TEXT, file_path TEXT, file_type TEXT, reply_to INTEGER DEFAULT NULL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS likes (
-                    post_id INTEGER, username TEXT, PRIMARY KEY(post_id, username))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS servers (
-                    name TEXT PRIMARY KEY)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS channels (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, server_name TEXT, name TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS channel_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, user TEXT, text TEXT, reply_to INTEGER DEFAULT NULL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS dms (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_from TEXT, user_to TEXT, text TEXT, reply_to INTEGER DEFAULT NULL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS msg_reactions (
-                    message_id INTEGER, msg_type TEXT, username TEXT, emoji TEXT, 
-                    PRIMARY KEY(message_id, msg_type, username, emoji))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS notifications (
+    with sqlite3.connect(DB_FILE) as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+                        username TEXT PRIMARY KEY, password TEXT, bio TEXT, avatar_path TEXT, 
+                        role TEXT DEFAULT 'user', last_ip TEXT, last_device TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS follows (
+                        follower TEXT, following TEXT, PRIMARY KEY(follower, following))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS posts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT, text TEXT, file_path TEXT, file_type TEXT, reply_to INTEGER DEFAULT NULL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS likes (
+                        post_id INTEGER, username TEXT, PRIMARY KEY(post_id, username))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS servers (
+                        name TEXT PRIMARY KEY)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS channels (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, server_name TEXT, name TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS channel_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, user TEXT, text TEXT, reply_to INTEGER DEFAULT NULL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS dms (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, user_from TEXT, user_to TEXT, text TEXT, reply_to INTEGER DEFAULT NULL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS msg_reactions (
+                        message_id INTEGER, msg_type TEXT, username TEXT, emoji TEXT, 
+                        PRIMARY KEY(message_id, msg_type, username, emoji))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS notifications (
                         id INTEGER PRIMARY KEY AUTOINCREMENT, 
                         recipient TEXT, 
                         sender TEXT, 
                         type TEXT, 
                         is_read INTEGER DEFAULT 0)''')
 
-    # Migration block to inject columns into your existing database file
-    migrations = [
-        ("users", "avatar_path TEXT"),
-        ("posts", "file_path TEXT"),
-        ("posts", "file_type TEXT"),
-        ("posts", "reply_to INTEGER DEFAULT NULL"),
-        ("channel_messages", "reply_to INTEGER DEFAULT NULL"),
-        ("dms", "reply_to INTEGER DEFAULT NULL")
-    ]
-    for table, column in migrations:
-        try:
-            c.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
-        except sqlite3.OperationalError:
-            pass  # Already exists, skip error
+        # Migration block to inject columns into your existing database file
+        migrations = [
+            ("users", "avatar_path TEXT"),
+            ("posts", "file_path TEXT"),
+            ("posts", "file_type TEXT"),
+            ("posts", "reply_to INTEGER DEFAULT NULL"),
+            ("channel_messages", "reply_to INTEGER DEFAULT NULL"),
+            ("dms", "reply_to INTEGER DEFAULT NULL")
+        ]
+        for table, column in migrations:
+            try:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass  # Already exists, skip error
 
-    admin_hash = hashlib.sha256("Upd20isreal".encode()).hexdigest()
-    c.execute("SELECT username FROM users WHERE username = ?", ("ArchPenguin",))
-    if not c.fetchone():
-        c.execute("INSERT INTO users (username, password, bio, role) VALUES (?, ?, ?, ?)",
-                  ("ArchPenguin", admin_hash, "System Administrator", "superuser"))
+        admin_hash = hashlib.sha256("Upd20isreal".encode()).hexdigest()
+        c.execute("SELECT username FROM users WHERE username = ?", ("ArchPenguin",))
+        if not c.fetchone():
+            c.execute("INSERT INTO users (username, password, bio, role) VALUES (?, ?, ?, ?)",
+                      ("ArchPenguin", admin_hash, "System Administrator", "superuser"))
 
-    c.execute("INSERT OR IGNORE INTO servers (name) VALUES (?)", ("Global Server",))
-    c.execute("SELECT id FROM channels WHERE server_name = ? AND name = ?", ("Global Server", "general"))
-    if not c.fetchone():
-        c.execute("INSERT INTO channels (server_name, name) VALUES (?, ?)", ("Global Server", "general"))
-    conn.commit()
-    conn.close()
+        c.execute("INSERT OR IGNORE INTO servers (name) VALUES (?)", ("Global Server",))
+        c.execute("SELECT id FROM channels WHERE server_name = ? AND name = ?", ("Global Server", "general"))
+        if not c.fetchone():
+            c.execute("INSERT INTO channels (server_name, name) VALUES (?, ?)", ("Global Server", "general"))
+        conn.commit()
 
 
 init_db()
@@ -100,15 +96,14 @@ init_db()
 
 def query_db(query, args=(), one=False, commit=False):
     cleanup_old_db_data()
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(query, args)
-    if commit:
-        conn.commit()
-        rv = c.lastrowid if "INSERT" in query else None
-    else:
-        rv = c.fetchall()
-    conn.close()
+    with sqlite3.connect(DB_FILE) as conn:
+        c = conn.cursor()
+        c.execute(query, args)
+        if commit:
+            conn.commit()
+            rv = c.lastrowid if "INSERT" in query else None
+        else:
+            rv = c.fetchall()
     return (rv[0] if rv else None) if one else rv
 
 
@@ -157,10 +152,6 @@ def render_emoji_picker(key_prefix):
     emojis = ["", "😀", "😂", "🔥", "👍", "❤️", "👀", "🚀", "👑", "⚠️"]
     chosen_emoji = st.selectbox("Select an Emoji to Copy", emojis, key=f"picker_{key_prefix}")
     return chosen_emoji if chosen_emoji != "" else None
-    for idx, emo in enumerate(emojis):
-        if cols[idx].button(emo, key=f"picker_{key_prefix}_{idx}"):
-            chosen_emoji = emo
-    return chosen_emoji
 
 
 def render_sidebar(is_admin):
@@ -267,7 +258,7 @@ else:
 
     if view == "Feed":
         st.header("Feed Portal")
-        mode = st.radio("Display Layout Mode", ["Standard Stream", "Scroll Mode"], horizontal=True)
+        mode = st.radio("Display Layout Mode", ["Standard Stream", "TikTok Scroll Mode"], horizontal=True)
         with st.form("new_post", clear_on_submit=True):
             post_text = st.text_area("What is happening?")
             uploaded_file = st.file_uploader("Upload Image or Video Media",
@@ -345,6 +336,10 @@ else:
                         else:
                             query_db("INSERT INTO likes (post_id, username) VALUES (?, ?)",
                                      (p_id, st.session_state.user), commit=True)
+                            # Notify author
+                            if author != st.session_state.user:
+                                query_db("INSERT INTO notifications (recipient, sender, type) VALUES (?, ?, 'like')",
+                                         (author, st.session_state.user), commit=True)
                         st.rerun()
                 with col_del:
                     if is_admin_user:
@@ -443,13 +438,10 @@ else:
                                     query_db(
                                         "INSERT OR IGNORE INTO msg_reactions (message_id, msg_type, username, emoji) VALUES (?, 'channel', ?, '👍')",
                                         (msg_id, st.session_state.user), commit=True)
-                                    # Notify author
-                                    msg_user = query_db("SELECT user FROM channel_messages WHERE id = ?", (msg_id,),
-                                                        one=True)
-                                    if msg_user and msg_user[0] != st.session_state.user:
+                                    if msg_user != st.session_state.user:
                                         query_db(
                                             "INSERT INTO notifications (recipient, sender, type) VALUES (?, ?, 'reaction')",
-                                            (msg_user[0], st.session_state.user), commit=True)
+                                            (msg_user, st.session_state.user), commit=True)
                                 if is_admin_user and b_del.button("🗑️", key=f"del_ch_{msg_id}"):
                                     query_db("DELETE FROM channel_messages WHERE id = ?", (msg_id,), commit=True)
                                     st.rerun()
@@ -465,13 +457,16 @@ else:
                                     "INSERT INTO channel_messages (channel_id, user, text, reply_to) VALUES (?, ?, ?, ?)",
                                     (ch_id, st.session_state.user, msg_text, st.session_state.reply_target_id),
                                     commit=True)
+                                if st.session_state.reply_target_id:
+                                    parent_user = query_db("SELECT user FROM channel_messages WHERE id = ?", (st.session_state.reply_target_id,), one=True)
+                                    if parent_user and parent_user[0] != st.session_state.user:
+                                        query_db("INSERT INTO notifications (recipient, sender, type) VALUES (?, ?, 'reply')", (parent_user[0], st.session_state.user), commit=True)
                                 st.session_state.reply_target_id = None
                                 st.rerun()
 
     elif view == "Direct Messages":
         st.header("Direct Messaging Vault")
 
-        # Track dynamically logged active user DMs to auto-generate a selection sidebar list
         active_dm_nodes = query_db("""SELECT DISTINCT user_to FROM dms WHERE user_from = ? 
                                       UNION 
                                       SELECT DISTINCT user_from FROM dms WHERE user_to = ?""",
