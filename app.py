@@ -15,7 +15,7 @@ st.markdown("""
     .dm-bubble-me { background-color: #238636; padding: 10px; border-radius: 12px 12px 0px 12px; margin: 5px 0; text-align: right; }
     .dm-bubble-them { background-color: #21262d; padding: 10px; border-radius: 12px 12px 12px 0px; margin: 5px 0; text-align: left; }
 </style>
-""", unsafe_with_html=True)
+""", unsafe_allow_html=True)
 
 # 2. Session Context Init
 if "user" not in st.session_state:
