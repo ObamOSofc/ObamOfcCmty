@@ -3,8 +3,8 @@ import os
 import hashlib
 from supabase import create_client, Client
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://supabase.com/dashboard/project/tirjeabivhdqnowwhjrm")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "https://tirjeabivhdqnowwhjrm.supabase.co/rest/v1/")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://your-project.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "your-service-role-or-anon-key")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def hash_password(password: str) -> str:
